@@ -1,0 +1,76 @@
+name: 部署到 Firebase
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: functions/package-lock.json
+
+      - name: 安裝套件
+        working-directory: functions
+        run: npm ci
+
+      - name: 自動測試
+        working-directory: functions
+        run: npm test
+
+      - name: 檢查設定
+        id: check
+        env:
+          SA: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+          ADMIN_PASSWORD: ${{ secrets.ADMIN_PASSWORD }}
+        run: |
+          if [ -z "$SA" ]; then
+            echo "::warning::還沒設定 FIREBASE_SERVICE_ACCOUNT，這次只測試、不部署"
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+          else
+            if [ -z "$ADMIN_PASSWORD" ]; then echo "::warning::還沒設定 ADMIN_PASSWORD，後台會無法登入"; fi
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: 部署
+        if: steps.check.outputs.ok == 'true'
+        env:
+          SA: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+          ADMIN_PASSWORD: ${{ secrets.ADMIN_PASSWORD }}
+          LINE_CHANNEL_ACCESS_TOKEN: ${{ secrets.LINE_CHANNEL_ACCESS_TOKEN }}
+          LINE_LOGIN_CHANNEL_ID: ${{ vars.LINE_LOGIN_CHANNEL_ID }}
+          LIFF_ID: ${{ vars.LIFF_ID }}
+          ADMIN_LINE_USER_ID: ${{ vars.ADMIN_LINE_USER_ID }}
+        run: |
+          printf '%s' "$SA" > "$RUNNER_TEMP/sa.json"
+          export GOOGLE_APPLICATION_CREDENTIALS="$RUNNER_TEMP/sa.json"
+          PROJECT_ID=$(jq -r .project_id "$RUNNER_TEMP/sa.json")
+
+          q() { printf '"%s"' "$(printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g')"; }
+          {
+            echo "ADMIN_PASSWORD=$(q "$ADMIN_PASSWORD")"
+            echo "LINE_CHANNEL_ACCESS_TOKEN=$(q "$LINE_CHANNEL_ACCESS_TOKEN")"
+            echo "LINE_LOGIN_CHANNEL_ID=$(q "$LINE_LOGIN_CHANNEL_ID")"
+            echo "LIFF_ID=$(q "$LIFF_ID")"
+            echo "ADMIN_LINE_USER_ID=$(q "$ADMIN_LINE_USER_ID")"
+          } > functions/.env
+
+          npx -y firebase-tools@latest deploy --project "$PROJECT_ID" --non-interactive --force
+          rm -f functions/.env "$RUNNER_TEMP/sa.json"
+
+          {
+            echo "### 部署完成"
+            echo "- 客人預約頁（LIFF Endpoint URL）：https://$PROJECT_ID.web.app/"
+            echo "- 設計師後台：https://$PROJECT_ID.web.app/admin.html"
+          } >> "$GITHUB_STEP_SUMMARY"

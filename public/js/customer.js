@@ -9,39 +9,29 @@ let page = "book";
 const pick = { service: null, date: null, time: null, slots: null };
 
 async function api(action, data = {}) {
-  const r = await fetch(FN_URL, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", apikey: C.SUPABASE_ANON_KEY, Authorization: "Bearer " + C.SUPABASE_ANON_KEY },
-    body: JSON.stringify({ action, idToken, ...data }),
-  });
-  const j = await r.json().catch(() => ({}));
-  if (!r.ok) {
-    if (j.error === "LINE_LOGIN_EXPIRED") { liff.logout(); liff.login({ redirectUri: location.href }); throw new Error("重新登入中…"); }
-    throw new Error(j.error || "發生錯誤，請稍後再試");
+  try {
+    return await callApi(action, { idToken, ...data });
+  } catch (e) {
+    if (e.code === "LINE_LOGIN_EXPIRED") { liff.logout(); liff.login({ redirectUri: location.href }); throw new Error("重新登入中…"); }
+    throw e;
   }
-  return j;
 }
 
 async function init() {
   try {
-    await liff.init({ liffId: C.LIFF_ID });
+    const pub = await callApi("public");
+    settings = pub.settings; services = pub.services; closed = new Set(pub.closedDates); works = pub.portfolio;
+    $("#shopName").textContent = settings.shopName;
+    $("#shopSub").textContent = settings.designerName ? `設計師 ${settings.designerName}` : "";
+    document.title = settings.shopName + "｜線上預約";
+
+    await liff.init({ liffId: pub.liffId });
     if (!liff.isLoggedIn()) { liff.login({ redirectUri: location.href }); return; }
     idToken = liff.getIDToken();
     const q = new URLSearchParams(location.search).get("page");
     if (["book", "mine", "works", "price"].includes(q)) page = q;
+    me = await api("me");
 
-    const [s, sv, cd, pf, m] = await Promise.all([
-      sb.from("settings").select("*").eq("id", 1).single(),
-      sb.from("services").select("*").eq("active", true).order("sort").order("id"),
-      sb.from("closed_dates").select("date").gte("date", twToday()),
-      sb.from("portfolio").select("*").order("sort").order("created_at", { ascending: false }),
-      api("me"),
-    ]);
-    settings = s.data; services = sv.data || []; closed = new Set((cd.data || []).map((r) => r.date));
-    works = pf.data || []; me = m;
-    $("#shopName").textContent = settings.shop_name;
-    $("#shopSub").textContent = settings.designer_name ? `設計師 ${settings.designer_name}` : "";
-    document.title = settings.shop_name + "｜線上預約";
     $$("nav.tabs button").forEach((b) => b.addEventListener("click", () => go(b.dataset.page)));
     go(page);
   } catch (e) {
@@ -64,19 +54,18 @@ function renderBook() {
 
   const today = twToday();
   const days = [];
-  for (let i = 0; i <= settings.days_ahead; i++) {
+  for (let i = 0; i <= settings.daysAhead; i++) {
     const d = addDays(today, i);
-    const open = settings.open_weekdays.includes(weekdayOf(d)) && !closed.has(d);
-    days.push({ d, open });
+    days.push({ d, open: settings.openWeekdays.includes(weekdayOf(d)) && !closed.has(d) });
   }
 
   app.innerHTML = `
     ${settings.notice ? `<div class="card small">${esc(settings.notice).replace(/\n/g, "<br>")}</div>` : ""}
     <h2>1　選擇服務</h2>
     ${services.map((s) => `
-      <div class="card pick ${pick.service?.id === s.id ? "on" : ""}" data-svc="${s.id}">
+      <div class="card pick ${pick.service?.id === s.id ? "on" : ""}" data-svc="${esc(s.id)}">
         <div class="row between"><b>${esc(s.name)}</b><span class="price">${esc(fmtPrice(s))}</span></div>
-        <div class="muted">約 ${fmtDur(s.duration_min)}${s.description ? "・" + esc(s.description) : ""}</div>
+        <div class="muted">約 ${fmtDur(s.durationMin)}${s.description ? "・" + esc(s.description) : ""}</div>
       </div>`).join("")}
     <div id="stepDate" class="${pick.service ? "" : "hidden"}">
       <h2>2　選擇日期</h2>
@@ -102,7 +91,7 @@ function renderBook() {
     </div>`;
 
   $$("[data-svc]").forEach((el) => el.addEventListener("click", () => {
-    pick.service = services.find((s) => s.id == el.dataset.svc);
+    pick.service = services.find((s) => s.id === el.dataset.svc);
     pick.time = null; pick.slots = null;
     renderBook();
     if (pick.date) loadSlots();
@@ -116,7 +105,6 @@ function renderBook() {
     updateBar();
     loadSlots();
   }));
-  // 讓選到的日期可見
   $(".chip.on")?.scrollIntoView({ inline: "center", block: "nearest" });
   if (pick.date && pick.slots) drawSlots();
   updateBar();
@@ -150,6 +138,7 @@ function updateBar() {
   const bar = $("#bar"), btn = $("#barBtn");
   if (page !== "book" || !pick.service || !pick.date || !pick.time) { bar.classList.add("hidden"); return; }
   bar.classList.remove("hidden");
+  btn.disabled = false;
   btn.textContent = `確認預約　${fmtDate(pick.date)} ${pick.time}`;
   btn.onclick = submitBooking;
 }
@@ -172,30 +161,29 @@ async function submitBooking() {
       <div class="success">
         <div class="big">${ok ? "🎉" : "📩"}</div>
         <h2 style="color:var(--ink);font-size:20px">${ok ? "預約成功！" : "已送出預約"}</h2>
-        <p>${fmtWhen(booking.start_at)}<br>${esc(booking.service_name)}</p>
-        <p class="muted">${ok ? "前一天會用 LINE 提醒你" : "設計師確認後會用 LINE 通知你"}</p>
+        <p>${fmtWhen(booking.start)}<br>${esc(booking.serviceName)}</p>
+        <p class="muted">${ok ? "前一天晚上會用 LINE 提醒你" : "設計師確認後會用 LINE 通知你"}</p>
         <br><button class="btn ghost" onclick="go('mine')">查看我的預約</button>
       </div>`;
     Object.assign(pick, { service: null, date: null, time: null, slots: null });
   } catch (e) {
     toast(e.message, 3500);
-    btn.disabled = false; updateBar();
-    if (/時段/.test(e.message)) { pick.time = null; loadSlots(); $("#stepForm").classList.add("hidden"); updateBar(); }
+    if (/時段/.test(e.message)) { pick.time = null; $("#stepForm").classList.add("hidden"); loadSlots(); }
+    updateBar();
   }
 }
 
 // ---------- 我的預約 ----------
 function renderMine() {
   const now = Date.now();
-  const upcoming = me.bookings.filter((b) => Date.parse(b.start_at) >= now && ["pending", "confirmed"].includes(b.status))
-    .sort((a, b) => a.start_at.localeCompare(b.start_at));
+  const upcoming = me.bookings.filter((b) => b.start >= now && ["pending", "confirmed"].includes(b.status)).sort((a, b) => a.start - b.start);
   const past = me.bookings.filter((b) => !upcoming.includes(b));
   const card = (b, canCancel) => `
     <div class="card">
-      <div class="row between"><b>${fmtWhen(b.start_at)}</b><span class="badge ${b.status}">${STATUS[b.status]}</span></div>
-      <div>${esc(b.service_name)}</div>
+      <div class="row between"><b>${fmtWhen(b.start)}</b><span class="badge ${b.status}">${STATUS[b.status]}</span></div>
+      <div>${esc(b.serviceName)}</div>
       ${b.note ? `<div class="muted small">備註：${esc(b.note)}</div>` : ""}
-      ${canCancel ? `<div class="row" style="margin-top:10px;justify-content:flex-end"><button class="btn danger sm" data-cancel="${b.id}">取消預約</button></div>` : ""}
+      ${canCancel ? `<div class="row" style="margin-top:10px;justify-content:flex-end"><button class="btn danger sm" data-cancel="${esc(b.id)}">取消預約</button></div>` : ""}
     </div>`;
   $("#app").innerHTML = `
     <h2>即將到來</h2>
@@ -207,11 +195,11 @@ function renderMine() {
       <label class="f"><span>手機</span><input type="tel" id="pPhone" value="${esc(me.customer.phone)}"></label>
       <button class="btn ghost sm" id="pSave">儲存</button>
     </div>
-    <p class="muted small center" style="margin-top:24px">LINE ID：${esc(me.customer.line_user_id)}</p>`;
+    <p class="muted small center" style="margin-top:24px">LINE ID：${esc(me.customer.lineUserId)}</p>`;
 
   $$("[data-cancel]").forEach((el) => el.addEventListener("click", async () => {
-    const b = me.bookings.find((x) => x.id == el.dataset.cancel);
-    if (!confirm(`確定要取消 ${fmtWhen(b.start_at)} 的預約嗎？`)) return;
+    const b = me.bookings.find((x) => x.id === el.dataset.cancel);
+    if (!confirm(`確定要取消 ${fmtWhen(b.start)} 的預約嗎？`)) return;
     el.disabled = true;
     try { await api("cancel", { bookingId: b.id }); b.status = "cancelled"; toast("已取消預約"); renderMine(); }
     catch (e) { toast(e.message); el.disabled = false; }
@@ -228,7 +216,7 @@ function renderMine() {
 // ---------- 作品集 ----------
 function renderWorks() {
   $("#app").innerHTML = works.length
-    ? `<div class="gallery">${works.map((w) => `<figure data-src="${esc(publicUrl(w.image_path))}"><img loading="lazy" src="${esc(publicUrl(w.image_path))}" alt="">${w.title ? `<figcaption>${esc(w.title)}</figcaption>` : ""}</figure>`).join("")}</div>`
+    ? `<div class="gallery">${works.map((w) => `<figure data-src="${esc(w.url)}"><img loading="lazy" src="${esc(w.url)}" alt="">${w.title ? `<figcaption>${esc(w.title)}</figcaption>` : ""}</figure>`).join("")}</div>`
     : `<div class="empty">作品整理中，敬請期待 ✨</div>`;
   $$("[data-src]").forEach((f) => f.addEventListener("click", () => viewImage(f.dataset.src)));
 }
@@ -236,20 +224,20 @@ function renderWorks() {
 // ---------- 價目表 ----------
 function renderPrice() {
   const map = settings.address ? `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(settings.address)}` : "";
-  const days = [1, 2, 3, 4, 5, 6, 0].filter((d) => settings.open_weekdays.includes(d)).map((d) => WEEK[d]).join("、");
+  const days = [1, 2, 3, 4, 5, 6, 0].filter((d) => settings.openWeekdays.includes(d)).map((d) => WEEK[d]).join("、");
   $("#app").innerHTML = `
     <h2>服務價目</h2>
     <div class="card">
       ${services.map((s, i) => `
         <div style="${i ? "border-top:1px solid var(--line);padding-top:10px;margin-top:10px" : ""}">
           <div class="row between"><b>${esc(s.name)}</b><span class="price">${esc(fmtPrice(s))}</span></div>
-          <div class="muted small">約 ${fmtDur(s.duration_min)}${s.description ? "・" + esc(s.description) : ""}</div>
+          <div class="muted small">約 ${fmtDur(s.durationMin)}${s.description ? "・" + esc(s.description) : ""}</div>
         </div>`).join("")}
     </div>
     <h2>店家資訊</h2>
     <div class="card">
-      <div><b>${esc(settings.shop_name)}</b></div>
-      <div class="muted">營業：週${days}　${settings.open_time.slice(0, 5)}–${settings.close_time.slice(0, 5)}</div>
+      <div><b>${esc(settings.shopName)}</b></div>
+      <div class="muted">營業：週${days}　${settings.openTime}–${settings.closeTime}</div>
       ${settings.address ? `<div style="margin-top:6px">📍 <a href="${map}" target="_blank">${esc(settings.address)}</a></div>` : ""}
       ${settings.phone ? `<div>📞 <a href="tel:${esc(settings.phone)}">${esc(settings.phone)}</a></div>` : ""}
     </div>
