@@ -49,8 +49,8 @@ jobs:
           SA: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
           ADMIN_PASSWORD: ${{ secrets.ADMIN_PASSWORD }}
           LINE_CHANNEL_ACCESS_TOKEN: ${{ secrets.LINE_CHANNEL_ACCESS_TOKEN }}
-          LINE_LOGIN_CHANNEL_ID: ${{ vars.LINE_LOGIN_CHANNEL_ID }}
-          LIFF_ID: ${{ vars.LIFF_ID }}
+          LINE_LOGIN_CHANNEL_ID: ${{ vars.LINE_LOGIN_CHANNEL_ID || '2012726374' }}
+          LIFF_ID: ${{ vars.LIFF_ID || '2012726374-xwlv0P4R' }}
           ADMIN_LINE_USER_ID: ${{ vars.ADMIN_LINE_USER_ID }}
         run: |
           printf '%s' "$SA" > "$RUNNER_TEMP/sa.json"
