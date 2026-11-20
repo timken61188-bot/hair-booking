@@ -1,0 +1,17 @@
+name: 每晚預約提醒
+
+on:
+  schedule:
+    - cron: "7 12 * * *"   # 每天 UTC 12:07 = 台灣晚上 8 點左右
+  workflow_dispatch:
+
+jobs:
+  remind:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 傳送明天的預約提醒
+        env:
+          URL: ${{ vars.SUPABASE_URL }}/functions/v1/reminders
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+        run: |
+          curl -fsS -X POST "$URL" -H "x-cron-secret: $CRON_SECRET" -H "Content-Type: application/json" -d '{}'

@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>線上預約</title>
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <header class="top">
+    <h1 id="shopName">　</h1>
+    <p id="shopSub"></p>
+  </header>
+  <nav class="tabs">
+    <button data-page="book" class="on">預約</button>
+    <button data-page="mine">我的預約</button>
+    <button data-page="works">作品集</button>
+    <button data-page="price">價目表</button>
+  </nav>
+  <main id="app"><div class="loading">載入中…</div></main>
+  <div class="bar hidden" id="bar"><div><button class="btn accent block" id="barBtn"></button></div></div>
+
+  <script src="https://static.line-scdn.net/liff/edge/2/sdk.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <script src="js/config.js"></script>
+  <script src="js/common.js"></script>
+  <script src="js/customer.js"></script>
+</body>
+</html>

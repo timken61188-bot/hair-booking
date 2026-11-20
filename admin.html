@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <title>設計師後台</title>
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <div id="login" class="hidden">
+    <main style="max-width:380px;padding-top:15vh">
+      <h1 style="margin:0 0 4px">設計師後台</h1>
+      <p class="muted" style="margin-top:0">請用 Supabase 建立的帳號登入</p>
+      <div class="card">
+        <label class="f"><span>Email</span><input type="email" id="lEmail" autocomplete="username"></label>
+        <label class="f"><span>密碼</span><input type="password" id="lPw" autocomplete="current-password"></label>
+        <button class="btn block" id="lBtn">登入</button>
+      </div>
+    </main>
+  </div>
+
+  <div id="shell" class="hidden">
+    <header class="top row between">
+      <div><h1 id="shopName">後台</h1><p>設計師後台</p></div>
+      <button class="btn ghost sm" id="logout">登出</button>
+    </header>
+    <nav class="tabs">
+      <button data-page="bookings" class="on">預約</button>
+      <button data-page="customers">客人</button>
+      <button data-page="works">作品集</button>
+      <button data-page="services">服務</button>
+      <button data-page="settings">設定</button>
+    </nav>
+    <main id="app"></main>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <script src="js/config.js"></script>
+  <script src="js/common.js"></script>
+  <script src="js/admin.js"></script>
+</body>
+</html>

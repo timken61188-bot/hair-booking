@@ -1,0 +1,7 @@
+project_id = "hair-salon"
+
+[functions.api]
+verify_jwt = false
+
+[functions.reminders]
+verify_jwt = false
