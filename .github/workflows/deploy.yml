@@ -53,7 +53,8 @@ jobs:
           LIFF_ID: ${{ vars.LIFF_ID || '2012726374-xwlv0P4R' }}
           ADMIN_LINE_USER_ID: ${{ vars.ADMIN_LINE_USER_ID }}
         run: |
-          printf '%s' "$SA" > "$RUNNER_TEMP/sa.json"
+          # 只取第一段 JSON（避免金鑰被重複貼上）
+          printf '%s' "$SA" | jq -s '.[0]' > "$RUNNER_TEMP/sa.json"
           export GOOGLE_APPLICATION_CREDENTIALS="$RUNNER_TEMP/sa.json"
           PROJECT_ID=$(jq -r .project_id "$RUNNER_TEMP/sa.json")
 
