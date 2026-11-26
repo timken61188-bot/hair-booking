@@ -7,6 +7,8 @@ let closed = new Set();
 let works = [];
 let page = "book";
 const pick = { service: null, date: null, time: null, slots: null };
+let calMonth = null;          // "YYYY-MM"
+const monthCache = {};        // key: serviceId|month → { date: status }
 
 async function api(action, data = {}) {
   try {
@@ -53,11 +55,7 @@ function renderBook() {
   if (!services.length) { app.innerHTML = `<div class="empty">目前尚未開放線上預約</div>`; return; }
 
   const today = twToday();
-  const days = [];
-  for (let i = 0; i <= settings.daysAhead; i++) {
-    const d = addDays(today, i);
-    days.push({ d, open: settings.openWeekdays.includes(weekdayOf(d)) && !closed.has(d) });
-  }
+  calMonth ??= today.slice(0, 7);
 
   app.innerHTML = `
     ${settings.notice ? `<div class="card small">${esc(settings.notice).replace(/\n/g, "<br>")}</div>` : ""}
@@ -67,16 +65,8 @@ function renderBook() {
         <div class="row between"><b>${esc(s.name)}</b><span class="price">${esc(fmtPrice(s))}</span></div>
         <div class="muted">約 ${fmtDur(s.durationMin)}${s.description ? "・" + esc(s.description) : ""}</div>
       </div>`).join("")}
-    <div id="stepDate" class="${pick.service ? "" : "hidden"}">
-      <h2>2　選擇日期</h2>
-      <div class="chips">
-        ${days.map(({ d, open }) => {
-          const [, m, dd] = d.split("-").map(Number);
-          return `<button class="chip ${pick.date === d ? "on" : ""}" data-date="${d}" ${open ? "" : "disabled"}>
-            <small>${m}月</small><b>${dd}</b><small>${d === today ? "今天" : "週" + WEEK[weekdayOf(d)]}</small></button>`;
-        }).join("")}
-      </div>
-    </div>
+    <h2 id="stepDate">2　選擇日期</h2>
+    <div class="card" id="cal"></div>
     <div id="stepTime" class="${pick.date ? "" : "hidden"}">
       <h2>3　選擇時間</h2>
       <div id="slots"></div>
@@ -96,18 +86,68 @@ function renderBook() {
     renderBook();
     if (pick.date) loadSlots();
     $("#stepDate").scrollIntoView({ behavior: "smooth", block: "start" });
+    if (!pick.date) toast("請在月曆上選日期");
   }));
-  $$("[data-date]").forEach((el) => el.addEventListener("click", () => {
+  drawCalendar();
+  if (pick.date && pick.slots) drawSlots();
+  updateBar();
+}
+
+// ---------- 月曆 ----------
+function monthAdd(ym, n) {
+  const [y, m] = ym.split("-").map(Number);
+  const d = new Date(Date.UTC(y, m - 1 + n, 1));
+  return d.toISOString().slice(0, 7);
+}
+async function drawCalendar() {
+  const box = $("#cal");
+  if (!box) return;
+  const today = twToday();
+  const minMonth = today.slice(0, 7), maxMonth = addDays(today, settings.daysAhead).slice(0, 7);
+  const [y, m] = calMonth.split("-").map(Number);
+  const key = `${pick.service?.id || ""}|${calMonth}`;
+  const head = `
+    <div class="row between" style="margin-bottom:8px">
+      <button class="btn ghost sm" id="calPrev" ${calMonth <= minMonth ? "disabled" : ""}>‹</button>
+      <b>${y} 年 ${m} 月</b>
+      <button class="btn ghost sm" id="calNext" ${calMonth >= maxMonth ? "disabled" : ""}>›</button>
+    </div>`;
+  if (!monthCache[key]) {
+    box.innerHTML = head + `<div class="muted center" style="padding:40px 0">查詢中…</div>`;
+    bindNav();
+    try { monthCache[key] = (await api("month", { month: calMonth, serviceId: pick.service?.id || "" })).days; }
+    catch (e) { box.innerHTML = head + `<div class="muted center">${esc(e.message)}</div>`; bindNav(); return; }
+    if (key !== `${pick.service?.id || ""}|${calMonth}`) return;   // 使用者已切換
+  }
+  const days = monthCache[key];
+  const first = `${calMonth}-01`;
+  const lead = weekdayOf(first);
+  const cells = [];
+  for (let i = 0; i < lead; i++) cells.push(`<div></div>`);
+  Object.keys(days).sort().forEach((d) => {
+    const st = days[d];
+    const label = { open: "可約", full: "額滿", closed: "公休", out: "" }[st];
+    cells.push(`<button class="cal-day ${st} ${pick.date === d ? "on" : ""} ${d === today ? "today" : ""}" data-date="${d}" ${st === "open" ? "" : "disabled"}>
+      <b>${Number(d.slice(8))}</b><small>${label}</small></button>`);
+  });
+  box.innerHTML = head + `
+    <div class="cal-grid">${WEEK.map((w) => `<div class="cal-w">${w}</div>`).join("")}${cells.join("")}</div>
+    <div class="cal-legend"><span><i class="open"></i>可預約</span><span><i class="full"></i>已約滿</span><span><i class="closed"></i>公休</span></div>
+    ${pick.service ? "" : `<div class="muted small center" style="margin-top:6px">先選服務，月曆會依服務時間顯示得更準確</div>`}`;
+  bindNav();
+  $$("[data-date]", box).forEach((el) => el.addEventListener("click", () => {
+    if (!pick.service) { toast("請先選擇服務"); window.scrollTo({ top: 0, behavior: "smooth" }); return; }
     pick.date = el.dataset.date; pick.time = null;
-    $$("[data-date]").forEach((b) => b.classList.toggle("on", b === el));
+    $$("[data-date]", box).forEach((b) => b.classList.toggle("on", b === el));
     $("#stepTime").classList.remove("hidden");
     $("#stepForm").classList.add("hidden");
     updateBar();
     loadSlots();
   }));
-  $(".chip.on")?.scrollIntoView({ inline: "center", block: "nearest" });
-  if (pick.date && pick.slots) drawSlots();
-  updateBar();
+  function bindNav() {
+    $("#calPrev", box).onclick = () => { calMonth = monthAdd(calMonth, -1); drawCalendar(); };
+    $("#calNext", box).onclick = () => { calMonth = monthAdd(calMonth, 1); drawCalendar(); };
+  }
 }
 
 async function loadSlots() {
@@ -166,9 +206,10 @@ async function submitBooking() {
         <br><button class="btn ghost" onclick="go('mine')">查看我的預約</button>
       </div>`;
     Object.assign(pick, { service: null, date: null, time: null, slots: null });
+    Object.keys(monthCache).forEach((k) => delete monthCache[k]);
   } catch (e) {
     toast(e.message, 3500);
-    if (/時段/.test(e.message)) { pick.time = null; $("#stepForm").classList.add("hidden"); loadSlots(); }
+    if (/時段/.test(e.message)) { Object.keys(monthCache).forEach((k) => delete monthCache[k]); pick.time = null; $("#stepForm").classList.add("hidden"); loadSlots(); }
     updateBar();
   }
 }
@@ -201,7 +242,7 @@ function renderMine() {
     const b = me.bookings.find((x) => x.id === el.dataset.cancel);
     if (!confirm(`確定要取消 ${fmtWhen(b.start)} 的預約嗎？`)) return;
     el.disabled = true;
-    try { await api("cancel", { bookingId: b.id }); b.status = "cancelled"; toast("已取消預約"); renderMine(); }
+    try { await api("cancel", { bookingId: b.id }); b.status = "cancelled"; Object.keys(monthCache).forEach((k) => delete monthCache[k]); toast("已取消預約"); renderMine(); }
     catch (e) { toast(e.message); el.disabled = false; }
   }));
   $("#pSave").addEventListener("click", async () => {

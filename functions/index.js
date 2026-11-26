@@ -171,9 +171,8 @@ const actions = {
   // ===== 客人 =====
   async me({ idToken }) {
     const c = await getCustomer(idToken);
-    const since = Date.now() - 90 * 86400e3;
     const list = docs(await db.collection("bookings").where("customerId", "==", c.id).get())
-      .filter((b) => b.start >= since).sort((a, b) => b.start - a.start);
+      .sort((a, b) => b.start - a.start);
     return { customer: { name: c.name, phone: c.phone, lineName: c.lineName, lineUserId: c.lineUserId }, bookings: list.map(bookingView) };
   },
 
@@ -181,6 +180,36 @@ const actions = {
     const c = await getCustomer(idToken);
     await db.doc(`customers/${c.id}`).update({ name: str(name, 50), phone: str(phone, 30) });
     return { ok: true };
+  },
+
+  // 整個月每天的狀態：open（可預約）、full（已約滿）、closed（公休）、out（不在開放範圍）
+  async month({ idToken, month, serviceId }) {
+    await verifyLine(idToken);
+    if (!/^\d{4}-\d{2}$/.test(month)) throw new HttpError(400, "月份格式錯誤");
+    let durationMin;
+    if (serviceId) durationMin = (await getService(serviceId)).durationMin;
+    else {
+      const all = docs(await db.collection("services").get()).filter((x) => x.active !== false);
+      durationMin = all.length ? Math.min(...all.map((x) => x.durationMin || 60)) : 60;
+    }
+    const first = `${month}-01`;
+    const last = L.addDays(L.addDays(first, 32).slice(0, 8) + "01", -1);
+    const [settings, closedSnap, booked] = await Promise.all([
+      getSettings(),
+      db.collection("closedDates").where(admin.firestore.FieldPath.documentId(), ">=", first)
+        .where(admin.firestore.FieldPath.documentId(), "<=", last).get(),
+      db.collection("bookings").where("date", ">=", first).where("date", "<=", last).get().then(docs),
+    ]);
+    const closed = new Set(closedSnap.docs.map((d) => d.id));
+    const today = L.twDate(Date.now());
+    const days = {};
+    for (let d = first; d <= last; d = L.addDays(d, 1)) {
+      if (d < today || d > L.addDays(today, settings.daysAhead)) { days[d] = "out"; continue; }
+      if (closed.has(d) || !settings.openWeekdays.includes(L.weekdayOf(d))) { days[d] = "closed"; continue; }
+      const n = L.availableSlots({ date: d, durationMin, settings, busy: booked.filter((b) => b.date === d) }).length;
+      days[d] = n ? "open" : "full";
+    }
+    return { days };
   },
 
   async slots({ idToken, date, serviceId }) {
@@ -324,7 +353,13 @@ const actions = {
     return {
       customer: { id: s.id, name: c.name, phone: c.phone, note: c.note, lineName: c.lineName, hasLine: !!c.lineUserId },
       records: records.sort((a, b) => b.date.localeCompare(a.date) || b.createdAt - a.createdAt),
-      bookings: bookings.sort((a, b) => b.start - a.start).slice(0, 30),
+      bookings: bookings.sort((a, b) => b.start - a.start),
+      stats: {
+        visits: bookings.filter((b) => b.status === "done").length,
+        total: records.reduce((n, r) => n + (Number(r.price) || 0), 0),
+        lastVisit: [...bookings.filter((b) => b.status === "done").map((b) => b.date), ...records.map((r) => r.date)].sort().pop() || null,
+        cancelled: bookings.filter((b) => b.status === "cancelled").length,
+      },
     };
   },
 

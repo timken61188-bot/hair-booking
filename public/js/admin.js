@@ -194,10 +194,16 @@ async function pageCustomers() {
 async function customerSheet(id) {
   let data;
   try { data = await api("admin_customer", { id }); } catch (e) { return toast(e.message); }
-  const { customer: c, records: recs, bookings: bks } = data;
+  const { customer: c, records: recs, bookings: bks, stats } = data;
   sheet(`
     <div class="row between"><h3 style="margin:0">${esc(c.name || "客人")}</h3><button class="btn ghost sm" data-close>關閉</button></div>
     <br>
+    <div class="card stats">
+      <div><b>${stats.visits}</b><span>來店次數</span></div>
+      <div><b>$${stats.total.toLocaleString()}</b><span>累計消費</span></div>
+      <div><b>${stats.lastVisit ? fmtDate(stats.lastVisit).replace(/（.*/, "") : "—"}</b><span>上次來店</span></div>
+      <div><b>${stats.cancelled}</b><span>取消次數</span></div>
+    </div>
     <div class="card">
       <div class="row">
         <label class="f grow"><span>姓名</span><input type="text" id="cName" value="${esc(c.name)}"></label>
@@ -210,7 +216,7 @@ async function customerSheet(id) {
         <button class="btn danger sm" id="cDel" style="margin-left:auto">刪除客人</button>
       </div>
     </div>
-    <div class="row between"><h2>服務紀錄</h2><button class="btn accent sm" id="rAdd">＋ 新增紀錄</button></div>
+    <div class="row between"><h2>服務紀錄（${recs.length} 筆）</h2><button class="btn accent sm" id="rAdd">＋ 新增紀錄</button></div>
     ${recs.map((r) => `
       <div class="card">
         <div class="row between"><b>${fmtDate(r.date)}　${esc(r.service)}</b>${r.price != null ? `<span class="price">$${Number(r.price).toLocaleString()}</span>` : ""}</div>
@@ -219,7 +225,7 @@ async function customerSheet(id) {
         ${r.photos?.length ? `<div class="thumbs">${r.photos.map((p) => `<img src="${esc(p.url)}" data-view>`).join("")}</div>` : ""}
         <div class="row" style="justify-content:flex-end;margin-top:6px"><button class="btn ghost sm" data-edit-rec="${esc(r.id)}">編輯</button></div>
       </div>`).join("") || `<div class="card muted center">還沒有紀錄</div>`}
-    <h2>預約紀錄</h2>
+    <h2>全部預約紀錄（${bks.length} 筆）</h2>
     ${bks.map((b) => `<div class="card row between"><span>${fmtWhen(b.start)}　${esc(b.serviceName)}</span><span class="badge ${b.status}">${STATUS[b.status]}</span></div>`).join("") || `<div class="card muted center">沒有預約</div>`}
   `, (o, close) => {
     $("#cSave", o).onclick = async () => {
