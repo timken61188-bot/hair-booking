@@ -241,7 +241,7 @@ const actions = {
     });
     const when = L.twLabel(b.start);
     await push(c.lineUserId, settings.autoConfirm
-      ? `✅ 預約成功！\n${when}\n${svc.name}\n\n${settings.shopName}${settings.address ? "\n📍 " + settings.address : ""}\n\n如需取消請到「我的預約」${LIFF_URL() ? "\n" + LIFF_URL() + "?page=mine" : ""}`
+      ? `✅ 預約成功！\n${when}\n${svc.name}\n\n${settings.shopName}${settings.address ? "\n📍 " + settings.address : ""}\n\n如需取消請在預約前 ${settings.cancelHours} 小時到「我的預約」操作${LIFF_URL() ? "\n" + LIFF_URL() + "?page=mine" : ""}`
       : `📩 已收到你的預約，設計師確認後會再通知你\n${when}\n${svc.name}`);
     await push(ADMIN_LINE(), `🔔 新預約${settings.autoConfirm ? "" : "（待確認）"}\n${when}\n${svc.name}\n${name}　${phone}${b.note ? "\n備註：" + b.note : ""}`);
     return { booking: bookingView(b) };
@@ -254,6 +254,10 @@ const actions = {
     const b = snap.data();
     if (!snap.exists || b.customerId !== c.id || !L.ACTIVE.includes(b.status)) throw new HttpError(400, "這筆預約無法取消");
     if (b.start < Date.now()) throw new HttpError(400, "預約時間已過，無法取消");
+    const st = await getSettings();
+    if (st.cancelHours > 0 && b.start - Date.now() < st.cancelHours * 3600e3) {
+      throw new HttpError(400, `預約前 ${st.cancelHours} 小時內無法線上取消，請直接傳訊息給設計師`);
+    }
     await ref.update({ status: "cancelled" });
     await push(ADMIN_LINE(), `❌ 客人取消預約\n${L.twLabel(b.start)}\n${b.serviceName}\n${c.name}　${c.phone}`);
     return { ok: true };
@@ -322,7 +326,7 @@ const actions = {
     const c = (await db.doc(`customers/${b.customerId}`).get()).data() || {};
     if (status === "confirmed") {
       const s = await getSettings();
-      await push(c.lineUserId, `✅ 設計師已確認你的預約\n${L.twLabel(b.start)}\n${b.serviceName}\n\n${s.shopName}${s.address ? "\n📍 " + s.address : ""}`);
+      await push(c.lineUserId, `✅ 設計師已確認你的預約\n${L.twLabel(b.start)}\n${b.serviceName}\n\n${s.shopName}${s.address ? "\n📍 " + s.address : ""}${s.cancelHours > 0 ? `\n\n如需取消請在預約前 ${s.cancelHours} 小時操作，之後請直接傳訊息給我` : ""}`);
     } else if (status === "cancelled" && b.start > Date.now()) {
       await push(c.lineUserId, `很抱歉，你 ${L.twLabel(b.start)} 的預約（${b.serviceName}）已取消${reason ? "\n原因：" + str(reason, 300) : ""}\n\n歡迎重新預約其他時間 🙏${LIFF_URL() ? "\n" + LIFF_URL() : ""}`);
     }
@@ -473,7 +477,7 @@ const actions = {
       minNoticeHours: Math.max(0, Number(s.minNoticeHours) || 0), autoConfirm: !!s.autoConfirm,
       breaks: (s.breaks || []).filter((b) => /^\d{2}:\d{2}$/.test(b.start) && /^\d{2}:\d{2}$/.test(b.end) && b.end > b.start)
         .slice(0, 5).map((b) => ({ start: b.start, end: b.end })),
-      cancelHours: Math.max(0, Number(s.cancelHours ?? 24)),
+      cancelHours: Number.isFinite(Number(s.cancelHours)) ? Math.max(0, Number(s.cancelHours)) : 24,
     });
     return { ok: true };
   },

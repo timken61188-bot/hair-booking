@@ -463,6 +463,7 @@ async function pageSettings() {
         <div id="brList"></div>
         <button class="btn ghost sm" id="brAdd" style="margin-top:6px">＋ 新增休息時間</button>
       </div>
+      <label class="f"><span>預約前幾小時內不能線上取消（0＝隨時都能取消）</span><input type="number" id="sCancel" min="0" value="${s.cancelHours ?? 24}"></label>
       <label class="row small"><input type="checkbox" id="sAuto" ${s.autoConfirm ? "checked" : ""}> 客人預約後自動成立（不勾＝需要我確認）</label>
     </div>
     <button class="btn accent block" id="sSave">儲存設定</button>
@@ -506,7 +507,7 @@ async function pageSettings() {
         openWeekdays: $$("[data-wd]").filter((c) => c.checked).map((c) => Number(c.dataset.wd)),
         openTime: $("#sOpen").value, closeTime: $("#sClose").value, slotMinutes: $("#sSlot").value,
         daysAhead: $("#sAhead").value, minNoticeHours: $("#sMin").value, autoConfirm: $("#sAuto").checked,
-        breaks, cancelHours: s.cancelHours,
+        breaks, cancelHours: $("#sCancel").value === "" ? 24 : Number($("#sCancel").value),
       } });
       toast("已儲存"); pageSettings();
     } catch (e) { toast(e.message); }

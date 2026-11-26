@@ -219,15 +219,18 @@ function renderMine() {
   const now = Date.now();
   const upcoming = me.bookings.filter((b) => b.start >= now && ["pending", "confirmed"].includes(b.status)).sort((a, b) => a.start - b.start);
   const past = me.bookings.filter((b) => !upcoming.includes(b));
-  const card = (b, canCancel) => `
+  const cutoff = (settings.cancelHours || 0) * 3600e3;
+  const card = (b, upcomingCard) => { const canCancel = upcomingCard && b.start - now >= cutoff; return `
     <div class="card">
       <div class="row between"><b>${fmtWhen(b.start)}</b><span class="badge ${b.status}">${STATUS[b.status]}</span></div>
       <div>${esc(b.serviceName)}</div>
       ${b.note ? `<div class="muted small">備註：${esc(b.note)}</div>` : ""}
       ${canCancel ? `<div class="row" style="margin-top:10px;justify-content:flex-end"><button class="btn danger sm" data-cancel="${esc(b.id)}">取消預約</button></div>` : ""}
-    </div>`;
+      ${upcomingCard && !canCancel ? `<div class="muted small" style="margin-top:8px">預約前 ${settings.cancelHours} 小時內無法線上取消，如需更改請直接在聊天室傳訊息給設計師${settings.phone ? `，或來電 <a href="tel:${esc(settings.phone)}">${esc(settings.phone)}</a>` : ""}</div>` : ""}
+    </div>`; };
   $("#app").innerHTML = `
     <h2>即將到來</h2>
+    ${settings.cancelHours > 0 ? `<div class="muted small" style="margin:-4px 4px 8px">取消請在預約前 ${settings.cancelHours} 小時操作</div>` : ""}
     ${upcoming.length ? upcoming.map((b) => card(b, true)).join("") : `<div class="card muted center">目前沒有預約<br><br><button class="btn accent sm" onclick="go('book')">立即預約</button></div>`}
     ${past.length ? `<h2>過去紀錄</h2>${past.map((b) => card(b, false)).join("")}` : ""}
     <h2>我的資料</h2>
