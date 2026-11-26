@@ -18,7 +18,30 @@ const DEFAULT_SETTINGS = {
   autoConfirm: false,
   breaks: [],              // 每天固定休息，例如 [{ start: "13:00", end: "14:00" }]
   cancelHours: 24,         // 預約前幾小時內不能線上取消
+  revisitEnabled: false,   // 回訪提醒
+  revisitReserve: 30,      // 本月剩餘訊息少於這個數就不傳回訪提醒
+  dailySummary: true,      // 每晚把隔天行程傳給設計師
 };
+
+// 回訪提醒：找出今天該提醒的完成預約
+// bookings: 全部近期預約；revisitDays: { serviceId: 天數 }
+function revisitDue({ bookings, revisitDays, today }) {
+  const out = [];
+  const byCustomer = {};
+  bookings.forEach((b) => { (byCustomer[b.customerId] ??= []).push(b); });
+  for (const b of bookings) {
+    if (b.status !== "done" || b.revisitSentAt) continue;
+    const days = (b.serviceIds || [b.serviceId]).map((id) => Number(revisitDays[id]) || 0).filter((n) => n > 0);
+    if (!days.length) continue;
+    const due = addDays(b.date, Math.min(...days));
+    if (due !== today) continue;
+    const mine = byCustomer[b.customerId] || [];
+    // 之後已經來過，或已經約了下一次，就不提醒
+    if (mine.some((x) => x.id !== b.id && x.date > b.date && ["done", "pending", "confirmed"].includes(x.status))) continue;
+    out.push({ booking: b, days: Math.min(...days) });
+  }
+  return out;
+}
 
 const twDate = (ms) => new Date(ms + TW).toISOString().slice(0, 10);
 const twTime = (ms) => new Date(ms + TW).toISOString().slice(11, 16);
@@ -69,4 +92,4 @@ function availableSlots({ date, durationMin, settings, closed = false, busy = []
 const overlaps = (start, end, busy) =>
   busy.some((b) => ACTIVE.includes(b.status) && start < b.end && end > b.start);
 
-module.exports = { ACTIVE, DEFAULT_SETTINGS, WEEK, twDate, twTime, toMs, weekdayOf, addDays, twLabel, availableSlots, overlaps };
+module.exports = { revisitDue, ACTIVE, DEFAULT_SETTINGS, WEEK, twDate, twTime, toMs, weekdayOf, addDays, twLabel, availableSlots, overlaps };

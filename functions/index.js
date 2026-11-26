@@ -36,6 +36,21 @@ async function push(to, text) {
   if (!r.ok) console.error("LINE push failed", r.status, await r.text());
 }
 
+// 本月訊息用量（免費方案 200 則）
+async function lineQuota() {
+  const token = env("LINE_CHANNEL_ACCESS_TOKEN");
+  if (!token) return null;
+  const h = { Authorization: `Bearer ${token}` };
+  try {
+    const [q, u] = await Promise.all([
+      fetch("https://api.line.me/v2/bot/message/quota", { headers: h }).then((r) => r.json()),
+      fetch("https://api.line.me/v2/bot/message/quota/consumption", { headers: h }).then((r) => r.json()),
+    ]);
+    const limit = q.type === "limited" ? q.value : null;
+    return { limit, used: u.totalUsage ?? 0, remaining: limit == null ? null : Math.max(0, limit - (u.totalUsage ?? 0)) };
+  } catch (e) { console.error("quota", e); return null; }
+}
+
 async function verifyLine(idToken) {
   if (!idToken) throw new HttpError(401, "請用 LINE 開啟");
   const r = await fetch("https://api.line.me/oauth2/v2.1/verify", {
@@ -548,12 +563,13 @@ const actions = {
     return { ok: true };
   },
 
-  async admin_save_service({ id, name, description, durationMin, price, priceNote, sort, active }) {
+  async admin_save_service({ id, name, description, durationMin, price, priceNote, sort, active, revisitDays }) {
     if (!str(name)) throw new HttpError(400, "請填名稱");
     const data = {
       name: str(name, 50), description: str(description, 300), durationMin: Math.max(5, Number(durationMin) || 60),
       price: price === "" || price == null ? null : Number(price), priceNote: str(priceNote, 20),
       sort: Number(sort) || 0, active: active !== false,
+      revisitDays: Number(revisitDays) > 0 ? Math.round(Number(revisitDays)) : null,
     };
     if (id) await db.doc(`services/${str(id, 100)}`).set(data, { merge: true });
     else await db.collection("services").add(data);
@@ -576,6 +592,9 @@ const actions = {
       breaks: (s.breaks || []).filter((b) => /^\d{2}:\d{2}$/.test(b.start) && /^\d{2}:\d{2}$/.test(b.end) && b.end > b.start)
         .slice(0, 5).map((b) => ({ start: b.start, end: b.end })),
       cancelHours: Number.isFinite(Number(s.cancelHours)) ? Math.max(0, Number(s.cancelHours)) : 24,
+      revisitEnabled: !!s.revisitEnabled,
+      revisitReserve: Number.isFinite(Number(s.revisitReserve)) ? Math.max(0, Number(s.revisitReserve)) : 30,
+      dailySummary: s.dailySummary !== false,
     });
     return { ok: true };
   },
@@ -591,6 +610,9 @@ const actions = {
   async admin_block_delete({ id }) {
     await db.doc(`blocks/${str(id, 100)}`).delete();
     return { ok: true };
+  },
+  async admin_quota() {
+    return { quota: await lineQuota() };
   },
   async admin_closed_dates() {
     const today = L.twDate(Date.now());
@@ -635,8 +657,34 @@ exports.dailyReminder = onSchedule({ schedule: "0 20 * * *", timeZone: "Asia/Tai
     await push(c.lineUserId, `⏰ 預約提醒\n明天 ${L.twLabel(b.start)}\n${b.serviceName}\n\n${settings.shopName}${settings.address ? "\n📍 " + settings.address : ""}\n\n期待見到你！如需更改請直接回覆訊息 🙏`);
     await db.doc(`bookings/${b.id}`).update({ remindedAt: Date.now() });
   }
-  if (active.length && ADMIN_LINE()) {
+  if (active.length && ADMIN_LINE() && settings.dailySummary !== false) {
     const lines = active.map((b) => `${L.twTime(b.start)} ${names[b.id]}｜${b.serviceName}${b.status === "pending" ? "（待確認）" : ""}`);
     await push(ADMIN_LINE(), `📅 明天（${tomorrow.slice(5).replace("-", "/")}）共 ${lines.length} 位\n\n${lines.join("\n")}`);
+  }
+});
+
+// 每天早上 11 點：回訪提醒（例如染髮後 6 週）
+exports.revisitReminder = onSchedule({ schedule: "0 11 * * *", timeZone: "Asia/Taipei" }, async () => {
+  const settings = await getSettings();
+  if (!settings.revisitEnabled) return;
+  const services = docs(await db.collection("services").get());
+  const revisitDays = Object.fromEntries(services.filter((x) => x.revisitDays > 0).map((x) => [x.id, x.revisitDays]));
+  const max = Math.max(0, ...Object.values(revisitDays));
+  if (!max) return;
+  const today = L.twDate(Date.now());
+  const bookings = docs(await db.collection("bookings").where("date", ">=", L.addDays(today, -max - 1)).get());
+  const due = L.revisitDue({ bookings, revisitDays, today });
+  if (!due.length) return;
+
+  const quota = await lineQuota();
+  let remaining = quota?.remaining ?? Infinity;
+  for (const { booking: b, days } of due) {
+    if (remaining <= settings.revisitReserve) { console.log("訊息額度不足，暫停回訪提醒"); break; }
+    const c = (await db.doc(`customers/${b.customerId}`).get()).data() || {};
+    if (!c.lineUserId) continue;
+    const weeks = Math.round(days / 7);
+    await push(c.lineUserId, `嗨 ${c.name || ""}～距離上次${b.serviceName}已經 ${weeks} 週囉 💇\n\n想整理一下的話，可以直接預約喔！${LIFF_URL() ? "\n" + LIFF_URL() : ""}`);
+    await db.doc(`bookings/${b.id}`).update({ revisitSentAt: Date.now() });
+    remaining--;
   }
 });

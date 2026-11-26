@@ -427,6 +427,7 @@ async function pageServices() {
         <label class="f grow"><span>時長（分）</span><input type="number" name="durationMin" value="${s.durationMin}"></label>
       </div>
       <label class="f"><span>說明</span><input type="text" name="description" value="${esc(s.description)}"></label>
+      <label class="f"><span>回訪提醒：做完幾天後提醒客人再來（空白＝不提醒，例如染髮 42）</span><input type="number" name="revisitDays" value="${s.revisitDays ?? ""}"></label>
       <div class="row between">
         <label class="row small"><input type="checkbox" name="active" ${s.active !== false ? "checked" : ""}> 開放預約</label>
         <div class="row">${s.id ? `<button class="btn danger sm" data-sdel>刪除</button>` : ""}<button class="btn sm" data-ssave>儲存</button></div>
@@ -449,6 +450,7 @@ async function pageServices() {
           await api("admin_save_service", {
             id, name: v("name").value, description: v("description").value, durationMin: v("durationMin").value,
             price: v("price").value, priceNote: v("priceNote").value, sort: v("sort").value, active: v("active").checked,
+            revisitDays: v("revisitDays").value,
           });
           toast("已儲存"); pageServices();
         } catch (e) { toast(e.message); }
@@ -499,6 +501,13 @@ async function pageSettings() {
       <label class="f"><span>預約前幾小時內不能線上取消（0＝隨時都能取消）</span><input type="number" id="sCancel" min="0" value="${s.cancelHours ?? 24}"></label>
       <label class="row small"><input type="checkbox" id="sAuto" ${s.autoConfirm ? "checked" : ""}> 客人預約後自動成立（不勾＝需要我確認）</label>
     </div>
+    <h2>LINE 訊息</h2>
+    <div class="card">
+      <div id="quota" class="small muted">查詢本月用量中…</div>
+      <label class="row small" style="margin-top:10px"><input type="checkbox" id="sSummary" ${s.dailySummary !== false ? "checked" : ""}> 每晚 8 點把隔天行程傳給我（每月約 30 則）</label>
+      <label class="row small" style="margin-top:6px"><input type="checkbox" id="sRevisit" ${s.revisitEnabled ? "checked" : ""}> 開啟回訪提醒（天數在「服務」分頁各項目設定）</label>
+      <label class="f" style="margin-top:8px"><span>本月剩餘訊息少於幾則時，暫停回訪提醒（保留給預約通知）</span><input type="number" id="sReserve" min="0" value="${s.revisitReserve ?? 30}"></label>
+    </div>
     <button class="btn accent block" id="sSave">儲存設定</button>
     <h2>公休日／請假</h2>
     <div class="card">
@@ -516,6 +525,16 @@ async function pageSettings() {
     </div>
     <button class="btn ghost block" id="logout" style="margin-top:20px">登出</button>`;
 
+  api("admin_quota").then(({ quota: q }) => {
+    const el = $("#quota");
+    if (!el) return;
+    if (!q) { el.textContent = "無法查詢本月用量"; return; }
+    if (q.limit == null) { el.innerHTML = `本月已用 <b>${q.used}</b> 則`; return; }
+    const pct = Math.min(100, Math.round((q.used / q.limit) * 100));
+    el.innerHTML = `本月已用 <b style="color:var(--ink)">${q.used}</b> ／ ${q.limit} 則，剩 ${q.remaining} 則
+      <div style="height:8px;background:var(--line);border-radius:4px;margin-top:6px;overflow:hidden"><div style="height:100%;width:${pct}%;background:${pct > 85 ? "var(--danger)" : "var(--accent)"}"></div></div>
+      ${pct > 85 ? `<div style="color:var(--danger);margin-top:4px">額度快用完了，用完後客人會收不到預約通知</div>` : ""}`;
+  }).catch(() => { const el = $("#quota"); if (el) el.textContent = "無法查詢本月用量"; });
   let breaks = (s.breaks || []).map((b) => ({ ...b }));
   const drawBreaks = () => {
     $("#brList").innerHTML = breaks.map((b, i) => `
@@ -540,6 +559,8 @@ async function pageSettings() {
         openWeekdays: $$("[data-wd]").filter((c) => c.checked).map((c) => Number(c.dataset.wd)),
         openTime: $("#sOpen").value, closeTime: $("#sClose").value, slotMinutes: $("#sSlot").value,
         daysAhead: $("#sAhead").value, minNoticeHours: $("#sMin").value, autoConfirm: $("#sAuto").checked,
+        dailySummary: $("#sSummary").checked, revisitEnabled: $("#sRevisit").checked,
+        revisitReserve: $("#sReserve").value === "" ? 30 : Number($("#sReserve").value),
         breaks, cancelHours: $("#sCancel").value === "" ? 24 : Number($("#sCancel").value),
       } });
       toast("已儲存"); pageSettings();

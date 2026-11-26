@@ -1,6 +1,6 @@
 const test = require("node:test");
 const assert = require("node:assert");
-const { availableSlots, overlaps, toMs, twLabel, addDays } = require("../lib");
+const { availableSlots, overlaps, toMs, twLabel, addDays, revisitDue } = require("../lib");
 
 // 2026-11-20 是週五，台灣時間早上 9 點
 const now = toMs("2026-11-20", "09:00");
@@ -47,4 +47,18 @@ test("每天固定休息時間不能約", () => {
 test("單次封鎖（當作佔用）不能約", () => {
   const busy = [{ start: toMs("2026-11-21", "12:00"), end: toMs("2026-11-21", "13:00"), status: "confirmed" }];
   assert.deepStrictEqual(availableSlots({ date: "2026-11-21", durationMin: 30, settings, busy, now }), ["10:00", "10:30", "11:00", "11:30"]);
+});
+
+test("回訪提醒：到期才提醒，已約下次或已提醒過就不傳", () => {
+  const revisitDays = { dye: 42, cut: 35 };
+  const bookings = [
+    { id: "1", customerId: "A", status: "done", date: "2026-10-01", serviceIds: ["dye"] },             // 10/1 + 42 = 11/12
+    { id: "2", customerId: "B", status: "done", date: "2026-10-01", serviceIds: ["dye"] },
+    { id: "3", customerId: "B", status: "confirmed", date: "2026-11-20", serviceIds: ["cut"] },        // B 已約下次
+    { id: "4", customerId: "C", status: "done", date: "2026-10-01", serviceIds: ["dye"], revisitSentAt: 1 },
+    { id: "5", customerId: "D", status: "done", date: "2026-10-08", serviceIds: ["dye", "cut"] },      // 取短的 35 天 = 11/12
+    { id: "6", customerId: "E", status: "done", date: "2026-10-01", serviceIds: ["perm"] },            // 沒設定
+  ];
+  const due = revisitDue({ bookings, revisitDays, today: "2026-11-12" }).map((x) => x.booking.id);
+  assert.deepStrictEqual(due, ["1", "5"]);
 });
