@@ -4,7 +4,7 @@ const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
 const WEEK = ["日", "一", "二", "三", "四", "五", "六"];
-const STATUS = { pending: "待確認", confirmed: "已確認", cancelled: "已取消", done: "已完成" };
+const STATUS = { pending: "待確認", confirmed: "已確認", cancelled: "已取消", done: "已完成", noshow: "沒來" };
 
 // 呼叫後端
 async function callApi(action, data = {}, headers = {}) {

@@ -97,11 +97,14 @@ async function pageBookings() {
 function bookingCard(b) {
   const p = twParts(b.start), e = twParts(b.end);
   const acts = {
-    pending: [["confirmed", "確認", "ok"], ["cancelled", "婉拒", "danger"]],
-    confirmed: [["done", "完成", ""], ["cancelled", "取消", "danger"]],
+    pending: [["move", "改時間", "ghost"], ["confirmed", "確認", "ok"], ["cancelled", "婉拒", "danger"]],
+    confirmed: b.start > Date.now()
+      ? [["move", "改時間", "ghost"], ["cancelled", "取消", "danger"], ["done", "完成", ""]]
+      : [["noshow", "沒來", "ghost"], ["cancelled", "取消", "danger"], ["done", "完成", ""]],
     done: [["record", "寫紀錄", "ghost"]],
+    noshow: [["confirmed", "改回已確認", "ghost"]],
     cancelled: [],
-  }[b.status];
+  }[b.status] || [];
   return `
     <div class="card">
       <div class="row between">
@@ -112,6 +115,7 @@ function bookingCard(b) {
         <a href="javascript:void 0" data-cust="${esc(b.customerId)}">${esc(b.customerName || "（未填姓名）")}</a>
         ${b.customerPhone ? `<a class="muted" href="tel:${esc(b.customerPhone)}">${esc(b.customerPhone)}</a>` : ""}
         ${b.hasLine ? `<span class="badge">LINE</span>` : ""}
+        ${b.noShow ? `<span class="badge warn">⚠️ 爽約 ${b.noShow} 次</span>` : ""}
       </div>
       ${b.note ? `<div class="muted small">備註：${esc(b.note)}</div>` : ""}
       ${acts.length ? `<div class="row" style="margin-top:10px;justify-content:flex-end">
@@ -153,6 +157,8 @@ function blockSheet() {
 async function bookingAction(id, act, list) {
   const b = list.find((x) => x.id === id);
   if (act === "record") return recordSheet(b.customerId, null, b);
+  if (act === "move") return moveSheet(b);
+  if (act === "noshow" && !confirm(`把 ${b.customerName} ${fmtWhen(b.start)} 標記為「沒來」？\n會記在客人的紀錄裡，不會通知客人。`)) return;
   let reason = "";
   if (act === "cancelled") {
     reason = prompt(`取消 ${b.customerName} ${fmtWhen(b.start)} 的預約？\n可以填寫原因（會傳給客人，可留空）：`);
@@ -160,10 +166,31 @@ async function bookingAction(id, act, list) {
   }
   try {
     await api("admin_set_status", { bookingId: b.id, status: act, reason });
-    toast({ confirmed: "已確認，已通知客人", cancelled: "已取消", done: "已完成" }[act]);
+    toast({ confirmed: b.status === "noshow" ? "已改回已確認" : "已確認，已通知客人", cancelled: "已取消", done: "已完成", noshow: "已記錄為沒來" }[act]);
     if (act === "done") recordSheet(b.customerId, null, b);
     pageBookings();
   } catch (e) { toast(e.message); }
+}
+
+function moveSheet(b) {
+  const p = twParts(b.start);
+  sheet(`
+    <h3>改時間</h3>
+    <p class="muted small" style="margin-top:-6px">${esc(b.customerName)}・${esc(b.serviceName)}<br>原本：${fmtWhen(b.start)}（${fmtDur(Math.round((b.end - b.start) / 60e3))}）</p>
+    <div class="row">
+      <label class="f grow"><span>新日期</span><input type="date" id="mvDate" value="${p.date}"></label>
+      <label class="f grow"><span>新時間</span><input type="time" id="mvTime" step="900" value="${p.hm}"></label>
+    </div>
+    ${b.hasLine ? `<label class="row small" style="margin-bottom:12px"><input type="checkbox" id="mvNotify" checked> 用 LINE 通知客人新時間</label>` : ""}
+    <div class="row"><button class="btn ghost grow" data-close>取消</button><button class="btn accent grow" id="mvSave">確定</button></div>`,
+  (o, close) => {
+    $("#mvSave", o).onclick = async () => {
+      try {
+        await api("admin_move_booking", { bookingId: b.id, date: $("#mvDate", o).value, time: $("#mvTime", o).value, notify: !!$("#mvNotify", o)?.checked });
+        close(); toast("已改時間"); pageBookings();
+      } catch (e) { toast(e.message, 3500); }
+    };
+  });
 }
 
 async function newBookingSheet() {
@@ -178,7 +205,9 @@ async function newBookingSheet() {
       <label class="f grow"><span>姓名</span><input type="text" id="nbName"></label>
       <label class="f grow"><span>電話</span><input type="tel" id="nbPhone"></label>
     </div>
-    <label class="f"><span>服務</span><select id="nbSvc">${services.map((s) => `<option value="${esc(s.id)}">${esc(s.name)}（${fmtDur(s.durationMin)}）</option>`).join("")}</select></label>
+    <div class="f"><span class="muted small">服務（可以複選）</span>
+      <div class="row wrap" style="margin-top:4px">${services.map((s, i) => `<label class="row small" style="margin-right:8px"><input type="checkbox" data-nbsvc="${esc(s.id)}" ${i === 0 ? "checked" : ""}> ${esc(s.name)}</label>`).join("")}</div>
+    </div>
     <div class="row">
       <label class="f grow"><span>日期</span><input type="date" id="nbDate" value="${twToday()}"></label>
       <label class="f grow"><span>時間</span><input type="time" id="nbTime" step="900" value="${settings.openTime}"></label>
@@ -188,13 +217,16 @@ async function newBookingSheet() {
     <div class="row"><button class="btn ghost grow" data-close>取消</button><button class="btn accent grow" id="nbSave">建立</button></div>`,
   (o, close) => {
     $("#nbCust", o).onchange = (e) => $("#nbNew", o).classList.toggle("hidden", !!e.target.value);
-    $("#nbSvc", o).onchange = (e) => { $("#nbDur", o).value = services.find((s) => s.id === e.target.value).durationMin; };
+    const chosen = () => $$("[data-nbsvc]", o).filter((c) => c.checked).map((c) => c.dataset.nbsvc);
+    $$("[data-nbsvc]", o).forEach((c) => c.onchange = () => {
+      $("#nbDur", o).value = services.filter((s) => chosen().includes(s.id)).reduce((n, s) => n + s.durationMin, 0) || 60;
+    });
     $("#nbSave", o).onclick = async () => {
       const btn = $("#nbSave", o); btn.disabled = true;
       try {
         await api("admin_create_booking", {
           customerId: $("#nbCust", o).value, newName: $("#nbName", o).value, newPhone: $("#nbPhone", o).value,
-          serviceId: $("#nbSvc", o).value, date: $("#nbDate", o).value, time: $("#nbTime", o).value,
+          serviceIds: chosen(), date: $("#nbDate", o).value, time: $("#nbTime", o).value,
           durationMin: $("#nbDur", o).value, note: $("#nbNote", o).value,
         });
         close(); toast("已建立預約"); go("bookings");
@@ -246,6 +278,7 @@ async function customerSheet(id) {
       <div><b>$${stats.total.toLocaleString()}</b><span>累計消費</span></div>
       <div><b>${stats.lastVisit ? fmtDate(stats.lastVisit).replace(/（.*/, "") : "—"}</b><span>上次來店</span></div>
       <div><b>${stats.cancelled}</b><span>取消次數</span></div>
+      <div><b style="${stats.noShow ? "color:var(--danger)" : ""}">${stats.noShow}</b><span>爽約次數</span></div>
     </div>
     <div class="card">
       <div class="row">

@@ -20,7 +20,7 @@ const ADMIN_LINE = () => (env("ADMIN_LINE_USER_ID").startsWith("U") ? env("ADMIN
 class HttpError extends Error {
   constructor(status, message) { super(message); this.status = status; }
 }
-const STATUS = { pending: "待確認", confirmed: "已確認", cancelled: "已取消", done: "已完成" };
+const STATUS = { pending: "待確認", confirmed: "已確認", cancelled: "已取消", done: "已完成", noshow: "沒來" };
 const str = (v, max = 200) => String(v ?? "").trim().slice(0, max);
 const docs = (snap) => snap.docs.map((d) => ({ id: d.id, ...d.data() }));
 
@@ -91,6 +91,19 @@ async function dayBookings(date, tx) {
   const q = db.collection("bookings").where("date", "==", date);
   return docs(tx ? await tx.get(q) : await q.get());
 }
+// 一次預約多個項目：名稱用「＋」連起來，時間加總
+async function getServices(ids, mustBeActive = true) {
+  const list = [...new Set((Array.isArray(ids) ? ids : [ids]).filter(Boolean).map((x) => str(x, 100)))].slice(0, 5);
+  if (!list.length) throw new HttpError(400, "請選擇服務項目");
+  const svcs = [];
+  for (const id of list) svcs.push(await getService(id, mustBeActive));
+  return {
+    id: svcs[0].id, ids: svcs.map((x) => x.id), name: svcs.map((x) => x.name).join("＋"),
+    durationMin: svcs.reduce((n, x) => n + (Number(x.durationMin) || 0), 0),
+  };
+}
+const pickIds = (body) => body.serviceIds || body.serviceId;
+
 // 某天的單次封鎖時段（當作已被佔用）
 async function dayBlocks(date, tx) {
   const q = db.collection("blocks").where("date", "==", date);
@@ -122,12 +135,38 @@ async function createBooking({ customer, service, date, time, durationMin, note,
     const ref = db.collection("bookings").doc();
     const b = {
       customerId: customer.id, customerName: customer.name || "", customerPhone: customer.phone || "",
-      serviceId: service.id, serviceName: service.name, date, start, end,
+      serviceId: service.id, serviceIds: service.ids || [service.id], serviceName: service.name, date, start, end,
       status, note: str(note, 500), createdBy, remindedAt: null, createdAt: Date.now(),
     };
     tx.set(ref, b);
     tx.set(lockRef, { updatedAt: Date.now() });
     return { id: ref.id, ...b };
+  });
+}
+
+// 改期：檢查新時段時不算自己原本那筆
+async function moveBooking({ bookingId, customerId, date, time, status }) {
+  const settings = await getSettings();
+  const closed = await isClosed(date);
+  const ref = db.doc(`bookings/${bookingId}`);
+  return db.runTransaction(async (tx) => {
+    const snap = await tx.get(ref);
+    const old = snap.data();
+    if (!snap.exists || (customerId && old.customerId !== customerId) || !L.ACTIVE.includes(old.status)) {
+      throw new HttpError(400, "這筆預約無法改期");
+    }
+    const durationMin = Math.round((old.end - old.start) / 60e3);
+    const lockRef = db.doc(`locks/${date}`);
+    await tx.get(lockRef);
+    const busy = (await dayBookings(date, tx)).filter((b) => b.id !== bookingId);
+    const blocks = await dayBlocks(date, tx);
+    const slots = L.availableSlots({ date, durationMin, settings, closed, busy: [...busy, ...blocks] });
+    if (!slots.includes(time)) throw new HttpError(409, "這個時段已經無法預約，請選其他時間");
+    const start = L.toMs(date, time);
+    const upd = { date, start, end: start + durationMin * 60e3, status: status || old.status, remindedAt: null };
+    tx.update(ref, upd);
+    tx.set(lockRef, { updatedAt: Date.now() });
+    return { old: { id: snap.id, ...old }, now: { id: snap.id, ...old, ...upd } };
   });
 }
 
@@ -152,7 +191,7 @@ async function deletePhotos(paths) {
   await Promise.all(paths.filter(Boolean).map((p) => bucket.file(p).delete().catch(() => {})));
 }
 
-const bookingView = (b) => ({ id: b.id, serviceName: b.serviceName, start: b.start, end: b.end, status: b.status, note: b.note });
+const bookingView = (b) => ({ id: b.id, serviceName: b.serviceName, serviceIds: b.serviceIds || [b.serviceId], start: b.start, end: b.end, status: b.status, note: b.note });
 
 // ---------- 動作 ----------
 const actions = {
@@ -189,11 +228,14 @@ const actions = {
   },
 
   // 整個月每天的狀態：open（可預約）、full（已約滿）、closed（公休）、out（不在開放範圍）
-  async month({ idToken, month, serviceId }) {
+  async month(body) {
+    const { idToken, month } = body;
+    const serviceIds = pickIds(body);
     await verifyLine(idToken);
     if (!/^\d{4}-\d{2}$/.test(month)) throw new HttpError(400, "月份格式錯誤");
     let durationMin;
-    if (serviceId) durationMin = (await getService(serviceId)).durationMin;
+    if (body.durationMin) durationMin = Math.max(5, Number(body.durationMin) || 60);
+    else if (serviceIds && serviceIds.length) durationMin = (await getServices(serviceIds)).durationMin;
     else {
       const all = docs(await db.collection("services").get()).filter((x) => x.active !== false);
       durationMin = all.length ? Math.min(...all.map((x) => x.durationMin || 60)) : 60;
@@ -220,19 +262,29 @@ const actions = {
     return { days };
   },
 
-  async slots({ idToken, date, serviceId }) {
+  async slots(body) {
+    const { idToken, date } = body;
     await verifyLine(idToken);
-    const svc = await getService(serviceId);
+    // 改期時用原本那筆的時長，並且不把自己算進去
+    let svc, exclude = null;
+    if (body.bookingId) {
+      const b = (await db.doc(`bookings/${str(body.bookingId, 100)}`).get()).data();
+      if (!b) throw new HttpError(404, "找不到預約");
+      svc = { durationMin: Math.round((b.end - b.start) / 60e3) };
+      exclude = str(body.bookingId, 100);
+    } else svc = await getServices(pickIds(body));
     const [settings, closed, busy, blocks] = await Promise.all([getSettings(), isClosed(date), dayBookings(date), dayBlocks(date)]);
-    return { slots: L.availableSlots({ date, durationMin: svc.durationMin, settings, closed, busy: [...busy, ...blocks] }) };
+    const others = busy.filter((b) => b.id !== exclude);
+    return { slots: L.availableSlots({ date, durationMin: svc.durationMin, settings, closed, busy: [...others, ...blocks] }) };
   },
 
-  async book({ idToken, serviceId, date, time, name, phone, note }) {
+  async book(body) {
+    let { idToken, date, time, name, phone, note } = body;
     const c = await getCustomer(idToken);
     name = str(name, 50); phone = str(phone, 30);
     if (!name || !phone) throw new HttpError(400, "請填寫姓名和電話");
     await db.doc(`customers/${c.id}`).update({ name, phone });
-    const svc = await getService(serviceId);
+    const svc = await getServices(pickIds(body));
     const settings = await getSettings();
     const b = await createBooking({
       customer: { ...c, name, phone }, service: svc, date: str(date, 10), time: str(time, 5),
@@ -245,6 +297,25 @@ const actions = {
       : `📩 已收到你的預約，設計師確認後會再通知你\n${when}\n${svc.name}`);
     await push(ADMIN_LINE(), `🔔 新預約${settings.autoConfirm ? "" : "（待確認）"}\n${when}\n${svc.name}\n${name}　${phone}${b.note ? "\n備註：" + b.note : ""}`);
     return { booking: bookingView(b) };
+  },
+
+  async reschedule({ idToken, bookingId, date, time }) {
+    const c = await getCustomer(idToken);
+    const st = await getSettings();
+    const cur = (await db.doc(`bookings/${str(bookingId, 100)}`).get()).data();
+    if (!cur || cur.customerId !== c.id) throw new HttpError(400, "這筆預約無法改期");
+    if (st.cancelHours > 0 && cur.start - Date.now() < st.cancelHours * 3600e3) {
+      throw new HttpError(400, `預約前 ${st.cancelHours} 小時內無法線上改期，請直接傳訊息給設計師`);
+    }
+    const { old, now } = await moveBooking({
+      bookingId: str(bookingId, 100), customerId: c.id, date: str(date, 10), time: str(time, 5),
+      status: st.autoConfirm ? "confirmed" : "pending",
+    });
+    await push(c.lineUserId, st.autoConfirm
+      ? `🔁 改期成功！\n${L.twLabel(now.start)}\n${now.serviceName}`
+      : `🔁 已收到你的改期申請，設計師確認後會再通知你\n新時間：${L.twLabel(now.start)}\n${now.serviceName}`);
+    await push(ADMIN_LINE(), `🔁 客人改期${st.autoConfirm ? "" : "（待確認）"}\n${L.twLabel(old.start)} → ${L.twLabel(now.start)}\n${now.serviceName}\n${c.name}　${c.phone}`);
+    return { booking: bookingView(now) };
   },
 
   async cancel({ idToken, bookingId }) {
@@ -303,6 +374,9 @@ const actions = {
       const refs = ids.slice(i, i + 100).map((id) => db.doc(`customers/${id}`));
       (await db.getAll(...refs)).forEach((s) => { if (s.exists) custs[s.id] = s.data(); });
     }
+    const noShow = {};
+    docs(await db.collection("bookings").where("status", "==", "noshow").get())
+      .forEach((b) => { noShow[b.customerId] = (noShow[b.customerId] || 0) + 1; });
     let blocks = [];
     if (filter !== "past") {
       blocks = docs(await db.collection("blocks").where("date", ">=", today).get()).sort((a, b) => a.start - b.start);
@@ -311,7 +385,7 @@ const actions = {
       blocks,
       bookings: list.map((b) => {
         const c = custs[b.customerId] || {};
-        return { ...b, customerName: c.name ?? b.customerName, customerPhone: c.phone ?? b.customerPhone, hasLine: !!c.lineUserId };
+        return { ...b, customerName: c.name ?? b.customerName, customerPhone: c.phone ?? b.customerPhone, hasLine: !!c.lineUserId, noShow: noShow[b.customerId] || 0 };
       }),
     };
   },
@@ -333,7 +407,8 @@ const actions = {
     return { ok: true };
   },
 
-  async admin_create_booking({ customerId, newName, newPhone, serviceId, date, time, durationMin, note }) {
+  async admin_create_booking(body) {
+    const { customerId, newName, newPhone, date, time, durationMin, note } = body;
     let customer;
     if (customerId) {
       const s = await db.doc(`customers/${str(customerId, 100)}`).get();
@@ -346,12 +421,34 @@ const actions = {
       await ref.set(data);
       customer = { id: ref.id, ...data };
     }
-    const svc = await getService(serviceId, false);
+    const svc = await getServices(pickIds(body), false);
     const b = await createBooking({
       customer, service: svc, date: str(date, 10), time: str(time, 5),
       durationMin: Number(durationMin) || svc.durationMin, note, status: "confirmed", createdBy: "admin", checkSlots: false,
     });
     return { booking: b };
+  },
+
+  async admin_move_booking({ bookingId, date, time, notify }) {
+    const ref = db.doc(`bookings/${str(bookingId, 100)}`);
+    const cur = (await ref.get()).data();
+    if (!cur) throw new HttpError(404, "找不到預約");
+    const start = L.toMs(str(date, 10), str(time, 5));
+    if (!Number.isFinite(start)) throw new HttpError(400, "日期時間格式錯誤");
+    const end = start + (cur.end - cur.start);
+    await db.runTransaction(async (tx) => {
+      const lockRef = db.doc(`locks/${date}`);
+      await tx.get(lockRef);
+      const busy = (await dayBookings(date, tx)).filter((b) => b.id !== ref.id);
+      if (L.overlaps(start, end, busy)) throw new HttpError(409, "這個時段已經有其他預約");
+      tx.update(ref, { date, start, end, remindedAt: null });
+      tx.set(lockRef, { updatedAt: Date.now() });
+    });
+    if (notify) {
+      const c = (await db.doc(`customers/${cur.customerId}`).get()).data() || {};
+      await push(c.lineUserId, `🔁 你的預約時間已調整\n${L.twLabel(cur.start)} → ${L.twLabel(start)}\n${cur.serviceName}\n\n如果時間不方便，請直接回覆訊息 🙏`);
+    }
+    return { ok: true };
   },
 
   async admin_customers() {
@@ -376,6 +473,7 @@ const actions = {
         total: records.reduce((n, r) => n + (Number(r.price) || 0), 0),
         lastVisit: [...bookings.filter((b) => b.status === "done").map((b) => b.date), ...records.map((r) => r.date)].sort().pop() || null,
         cancelled: bookings.filter((b) => b.status === "cancelled").length,
+        noShow: bookings.filter((b) => b.status === "noshow").length,
       },
     };
   },
