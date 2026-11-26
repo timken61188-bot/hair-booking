@@ -91,6 +91,11 @@ async function dayBookings(date, tx) {
   const q = db.collection("bookings").where("date", "==", date);
   return docs(tx ? await tx.get(q) : await q.get());
 }
+// 某天的單次封鎖時段（當作已被佔用）
+async function dayBlocks(date, tx) {
+  const q = db.collection("blocks").where("date", "==", date);
+  return docs(tx ? await tx.get(q) : await q.get()).map((b) => ({ ...b, status: "confirmed" }));
+}
 async function isClosed(date) {
   return (await db.doc(`closedDates/${date}`).get()).exists;
 }
@@ -108,7 +113,8 @@ async function createBooking({ customer, service, date, time, durationMin, note,
     await tx.get(lockRef);
     const busy = await dayBookings(date, tx);
     if (checkSlots) {
-      const slots = L.availableSlots({ date, durationMin, settings, closed, busy });
+      const blocks = await dayBlocks(date, tx);
+      const slots = L.availableSlots({ date, durationMin, settings, closed, busy: [...busy, ...blocks] });
       if (!slots.includes(time)) throw new HttpError(409, "這個時段已經無法預約，請選其他時間");
     } else if (L.overlaps(start, end, busy)) {
       throw new HttpError(409, "這個時段已經有其他預約");
@@ -194,11 +200,13 @@ const actions = {
     }
     const first = `${month}-01`;
     const last = L.addDays(L.addDays(first, 32).slice(0, 8) + "01", -1);
-    const [settings, closedSnap, booked] = await Promise.all([
+    const [settings, closedSnap, booked, blocked] = await Promise.all([
       getSettings(),
       db.collection("closedDates").where(admin.firestore.FieldPath.documentId(), ">=", first)
         .where(admin.firestore.FieldPath.documentId(), "<=", last).get(),
       db.collection("bookings").where("date", ">=", first).where("date", "<=", last).get().then(docs),
+      db.collection("blocks").where("date", ">=", first).where("date", "<=", last).get()
+        .then((sn) => docs(sn).map((b) => ({ ...b, status: "confirmed" }))),
     ]);
     const closed = new Set(closedSnap.docs.map((d) => d.id));
     const today = L.twDate(Date.now());
@@ -206,7 +214,7 @@ const actions = {
     for (let d = first; d <= last; d = L.addDays(d, 1)) {
       if (d < today || d > L.addDays(today, settings.daysAhead)) { days[d] = "out"; continue; }
       if (closed.has(d) || !settings.openWeekdays.includes(L.weekdayOf(d))) { days[d] = "closed"; continue; }
-      const n = L.availableSlots({ date: d, durationMin, settings, busy: booked.filter((b) => b.date === d) }).length;
+      const n = L.availableSlots({ date: d, durationMin, settings, busy: [...booked, ...blocked].filter((b) => b.date === d) }).length;
       days[d] = n ? "open" : "full";
     }
     return { days };
@@ -215,8 +223,8 @@ const actions = {
   async slots({ idToken, date, serviceId }) {
     await verifyLine(idToken);
     const svc = await getService(serviceId);
-    const [settings, closed, busy] = await Promise.all([getSettings(), isClosed(date), dayBookings(date)]);
-    return { slots: L.availableSlots({ date, durationMin: svc.durationMin, settings, closed, busy }) };
+    const [settings, closed, busy, blocks] = await Promise.all([getSettings(), isClosed(date), dayBookings(date), dayBlocks(date)]);
+    return { slots: L.availableSlots({ date, durationMin: svc.durationMin, settings, closed, busy: [...busy, ...blocks] }) };
   },
 
   async book({ idToken, serviceId, date, time, name, phone, note }) {
@@ -291,7 +299,12 @@ const actions = {
       const refs = ids.slice(i, i + 100).map((id) => db.doc(`customers/${id}`));
       (await db.getAll(...refs)).forEach((s) => { if (s.exists) custs[s.id] = s.data(); });
     }
+    let blocks = [];
+    if (filter !== "past") {
+      blocks = docs(await db.collection("blocks").where("date", ">=", today).get()).sort((a, b) => a.start - b.start);
+    }
     return {
+      blocks,
       bookings: list.map((b) => {
         const c = custs[b.customerId] || {};
         return { ...b, customerName: c.name ?? b.customerName, customerPhone: c.phone ?? b.customerPhone, hasLine: !!c.lineUserId };
@@ -458,7 +471,23 @@ const actions = {
       openWeekdays: (s.openWeekdays || []).map(Number).filter((n) => n >= 0 && n <= 6),
       slotMinutes: Math.max(5, Number(s.slotMinutes) || 30), daysAhead: Math.max(1, Number(s.daysAhead) || 30),
       minNoticeHours: Math.max(0, Number(s.minNoticeHours) || 0), autoConfirm: !!s.autoConfirm,
+      breaks: (s.breaks || []).filter((b) => /^\d{2}:\d{2}$/.test(b.start) && /^\d{2}:\d{2}$/.test(b.end) && b.end > b.start)
+        .slice(0, 5).map((b) => ({ start: b.start, end: b.end })),
+      cancelHours: Math.max(0, Number(s.cancelHours ?? 24)),
     });
+    return { ok: true };
+  },
+  async admin_block_add({ date, startTime, endTime, note }) {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !/^\d{2}:\d{2}$/.test(startTime) || !/^\d{2}:\d{2}$/.test(endTime) || endTime <= startTime) {
+      throw new HttpError(400, "請確認日期和時間（結束要晚於開始）");
+    }
+    const start = L.toMs(date, startTime), end = L.toMs(date, endTime);
+    const clash = (await dayBookings(date)).filter((b) => L.ACTIVE.includes(b.status) && start < b.end && end > b.start);
+    await db.collection("blocks").add({ date, start, end, note: str(note, 50), createdAt: Date.now() });
+    return { ok: true, clash: clash.length };
+  },
+  async admin_block_delete({ id }) {
+    await db.doc(`blocks/${str(id, 100)}`).delete();
     return { ok: true };
   },
   async admin_closed_dates() {

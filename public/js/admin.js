@@ -60,9 +60,13 @@ function go(p) {
 
 // ---------- 預約 ----------
 async function pageBookings() {
-  const { bookings: list } = await api("admin_bookings", { filter: bookingFilter });
+  const { bookings: list, blocks } = await api("admin_bookings", { filter: bookingFilter });
   const groups = {};
   list.forEach((b) => { (groups[b.date] ??= []).push(b); });
+  if (bookingFilter === "upcoming") blocks.forEach((k) => { (groups[k.date] ??= []).push({ ...k, isBlock: true }); });
+  const dates = Object.keys(groups).sort();
+  if (bookingFilter === "past") dates.reverse();
+  dates.forEach((d) => groups[d].sort((a, b) => (bookingFilter === "past" ? b.start - a.start : a.start - b.start)));
 
   $("#app").innerHTML = `
     <div class="row between wrap" style="margin-bottom:6px">
@@ -70,14 +74,22 @@ async function pageBookings() {
         ${[["upcoming", "即將到來"], ["pending", "待確認"], ["past", "過去 60 天"]].map(([k, t]) =>
           `<button class="btn sm ${bookingFilter === k ? "" : "ghost"}" data-f="${k}">${t}</button>`).join("")}
       </div>
-      <button class="btn accent sm" id="addBooking">＋ 新增預約</button>
+      <div class="row">
+        <button class="btn ghost sm" id="addBlock">封鎖時段</button>
+        <button class="btn accent sm" id="addBooking">＋ 新增預約</button>
+      </div>
     </div>
-    ${list.length ? Object.entries(groups).map(([d, arr]) => `
-      <h2>${fmtDate(d)}${d === twToday() ? "・今天" : ""}　${arr.filter((b) => b.status !== "cancelled").length} 位</h2>
-      ${arr.map(bookingCard).join("")}`).join("") : `<div class="empty">沒有預約</div>`}`;
+    ${dates.length ? dates.map((d) => { const arr = groups[d]; return `
+      <h2>${fmtDate(d)}${d === twToday() ? "・今天" : ""}　${arr.filter((b) => !b.isBlock && b.status !== "cancelled").length} 位</h2>
+      ${arr.map((b) => (b.isBlock ? blockCard(b) : bookingCard(b))).join("")}`; }).join("") : `<div class="empty">沒有預約</div>`}`;
 
   $$("[data-f]").forEach((b) => b.addEventListener("click", () => { bookingFilter = b.dataset.f; go("bookings"); }));
   $("#addBooking").onclick = () => newBookingSheet();
+  $("#addBlock").onclick = () => blockSheet();
+  $$("[data-unblock]").forEach((btn) => btn.addEventListener("click", async () => {
+    if (!confirm("解除這個封鎖時段？客人就可以預約這段時間。")) return;
+    try { await api("admin_block_delete", { id: btn.dataset.unblock }); toast("已解除"); pageBookings(); } catch (e) { toast(e.message); }
+  }));
   $$("[data-act]").forEach((btn) => btn.addEventListener("click", () => bookingAction(btn.dataset.id, btn.dataset.act, list)));
   $$("[data-cust]").forEach((el) => el.addEventListener("click", () => customerSheet(el.dataset.cust)));
 }
@@ -105,6 +117,37 @@ function bookingCard(b) {
       ${acts.length ? `<div class="row" style="margin-top:10px;justify-content:flex-end">
         ${acts.map(([a, t, cls]) => `<button class="btn sm ${cls}" data-act="${a}" data-id="${esc(b.id)}">${t}</button>`).join("")}</div>` : ""}
     </div>`;
+}
+
+function blockCard(k) {
+  return `
+    <div class="card row between" style="background:#f1ece8;border-style:dashed">
+      <div><b>${twParts(k.start).hm}–${twParts(k.end).hm}　🚫 不開放預約</b>${k.note ? `<div class="muted small">${esc(k.note)}</div>` : ""}</div>
+      <button class="btn ghost sm" data-unblock="${esc(k.id)}">解除</button>
+    </div>`;
+}
+
+function blockSheet() {
+  sheet(`
+    <h3>封鎖時段</h3>
+    <p class="muted small" style="margin-top:-6px">這段時間客人在 LINE 上就選不到。整天休息請到「設定 → 公休日」。</p>
+    <label class="f"><span>日期</span><input type="date" id="bkDate" value="${twToday()}"></label>
+    <div class="row">
+      <label class="f grow"><span>開始</span><input type="time" id="bkStart" step="900" value="13:00"></label>
+      <label class="f grow"><span>結束</span><input type="time" id="bkEnd" step="900" value="14:00"></label>
+    </div>
+    <label class="f"><span>原因（自己看的，選填）</span><input type="text" id="bkNote" placeholder="例如：看牙醫"></label>
+    <div class="row"><button class="btn ghost grow" data-close>取消</button><button class="btn accent grow" id="bkSave">封鎖</button></div>`,
+  (o, close) => {
+    $("#bkSave", o).onclick = async () => {
+      try {
+        const r = await api("admin_block_add", { date: $("#bkDate", o).value, startTime: $("#bkStart", o).value, endTime: $("#bkEnd", o).value, note: $("#bkNote", o).value });
+        close();
+        toast(r.clash ? `已封鎖。注意：這段時間已經有 ${r.clash} 筆預約，請自行聯絡客人` : "已封鎖", r.clash ? 5000 : 2400);
+        bookingFilter = "upcoming"; pageBookings();
+      } catch (e) { toast(e.message); }
+    };
+  });
 }
 
 async function bookingAction(id, act, list) {
@@ -416,6 +459,10 @@ async function pageSettings() {
         <label class="f grow"><span>開放幾天內</span><input type="number" id="sAhead" value="${s.daysAhead}"></label>
         <label class="f grow"><span>至少提前（小時）</span><input type="number" id="sMin" value="${s.minNoticeHours}"></label>
       </div>
+      <div class="f" style="margin-top:4px"><span class="muted small">每天固定休息（例如午休），這段時間不開放預約</span>
+        <div id="brList"></div>
+        <button class="btn ghost sm" id="brAdd" style="margin-top:6px">＋ 新增休息時間</button>
+      </div>
       <label class="row small"><input type="checkbox" id="sAuto" ${s.autoConfirm ? "checked" : ""}> 客人預約後自動成立（不勾＝需要我確認）</label>
     </div>
     <button class="btn accent block" id="sSave">儲存設定</button>
@@ -435,7 +482,23 @@ async function pageSettings() {
     </div>
     <button class="btn ghost block" id="logout" style="margin-top:20px">登出</button>`;
 
+  let breaks = (s.breaks || []).map((b) => ({ ...b }));
+  const drawBreaks = () => {
+    $("#brList").innerHTML = breaks.map((b, i) => `
+      <div class="row" style="margin-top:6px">
+        <input type="time" step="900" value="${b.start}" data-br="${i}" data-k="start">
+        <span>–</span>
+        <input type="time" step="900" value="${b.end}" data-br="${i}" data-k="end">
+        <button class="btn danger sm" data-brdel="${i}">刪除</button>
+      </div>`).join("") || `<div class="muted small" style="margin-top:4px">目前沒有</div>`;
+    $$("[data-br]").forEach((el) => el.onchange = () => { breaks[el.dataset.br][el.dataset.k] = el.value; });
+    $$("[data-brdel]").forEach((el) => el.onclick = () => { breaks.splice(el.dataset.brdel, 1); drawBreaks(); });
+  };
+  drawBreaks();
+  $("#brAdd").onclick = () => { breaks.push({ start: "13:00", end: "14:00" }); drawBreaks(); };
+
   $("#sSave").onclick = async () => {
+    if (breaks.some((b) => !b.start || !b.end || b.end <= b.start)) return toast("休息時間的結束要晚於開始");
     try {
       await api("admin_save_settings", { settings: {
         shopName: $("#sShop").value, designerName: $("#sDesigner").value, address: $("#sAddr").value,
@@ -443,6 +506,7 @@ async function pageSettings() {
         openWeekdays: $$("[data-wd]").filter((c) => c.checked).map((c) => Number(c.dataset.wd)),
         openTime: $("#sOpen").value, closeTime: $("#sClose").value, slotMinutes: $("#sSlot").value,
         daysAhead: $("#sAhead").value, minNoticeHours: $("#sMin").value, autoConfirm: $("#sAuto").checked,
+        breaks, cancelHours: s.cancelHours,
       } });
       toast("已儲存"); pageSettings();
     } catch (e) { toast(e.message); }

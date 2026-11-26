@@ -38,3 +38,13 @@ test("重疊判斷", () => {
 test("台灣時間顯示", () => {
   assert.strictEqual(twLabel(toMs("2026-11-21", "14:30")), "11/21（六）14:30");
 });
+
+test("每天固定休息時間不能約", () => {
+  const s = availableSlots({ date: "2026-11-21", durationMin: 60, settings: { ...settings, breaks: [{ start: "11:00", end: "12:00" }] }, now });
+  assert.deepStrictEqual(s, ["10:00", "12:00"]);
+});
+
+test("單次封鎖（當作佔用）不能約", () => {
+  const busy = [{ start: toMs("2026-11-21", "12:00"), end: toMs("2026-11-21", "13:00"), status: "confirmed" }];
+  assert.deepStrictEqual(availableSlots({ date: "2026-11-21", durationMin: 30, settings, busy, now }), ["10:00", "10:30", "11:00", "11:30"]);
+});

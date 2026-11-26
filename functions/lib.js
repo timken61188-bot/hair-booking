@@ -16,6 +16,8 @@ const DEFAULT_SETTINGS = {
   daysAhead: 30,
   minNoticeHours: 2,
   autoConfirm: false,
+  breaks: [],              // 每天固定休息，例如 [{ start: "13:00", end: "14:00" }]
+  cancelHours: 24,         // 預約前幾小時內不能線上取消
 };
 
 const twDate = (ms) => new Date(ms + TW).toISOString().slice(0, 10);
@@ -49,6 +51,11 @@ function availableSlots({ date, durationMin, settings, closed = false, busy = []
   const step = Math.max(5, s.slotMinutes) * 60e3;
   const earliest = now + s.minNoticeHours * 3600e3;
   const taken = busy.filter((b) => ACTIVE.includes(b.status));
+  for (const br of s.breaks || []) {
+    if (/^\d{2}:\d{2}$/.test(br.start) && /^\d{2}:\d{2}$/.test(br.end) && br.end > br.start) {
+      taken.push({ start: toMs(date, br.start), end: toMs(date, br.end) });
+    }
+  }
 
   const out = [];
   for (let t = open; t + dur <= close; t += step) {

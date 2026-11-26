@@ -67,7 +67,7 @@ input[type=date], input[type=time], input[type=search], select, textarea {
 input:focus, select:focus, textarea:focus { border-color: var(--accent); }
 textarea { min-height: 76px; resize: vertical; }
 
-.btn { border: 0; border-radius: 12px; padding: 11px 16px; background: var(--ink); color: #fff; cursor: pointer; font-weight: 600; }
+.btn { white-space: nowrap; border: 0; border-radius: 12px; padding: 11px 16px; background: var(--ink); color: #fff; cursor: pointer; font-weight: 600; }
 .btn.accent { background: var(--accent); color: var(--accent-ink); }
 .btn.ghost { background: transparent; color: var(--ink); border: 1px solid var(--line); }
 .btn.danger { background: transparent; color: var(--danger); border: 1px solid #efcfcb; }
