@@ -6,7 +6,9 @@ const admin = require("firebase-admin");
 const crypto = require("crypto");
 const L = require("./lib");
 
-admin.initializeApp();
+// 新專案的儲存空間名稱是 <專案ID>.firebasestorage.app
+const PROJECT_ID = process.env.GCLOUD_PROJECT || JSON.parse(process.env.FIREBASE_CONFIG || "{}").projectId;
+admin.initializeApp({ storageBucket: (process.env.STORAGE_BUCKET || "").trim() || `${PROJECT_ID}.firebasestorage.app` });
 const db = admin.firestore();
 setGlobalOptions({ region: "asia-east1", maxInstances: 5 });
 
